@@ -1,0 +1,321 @@
+---
+title: "ML Markdown"
+author: "Patrick Carr"
+date: "2023-03-06"
+output: md_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE, include = FALSE}
+install.packages('pacman', repos = "http://cran.us.r-project.org")
+library(pacman)
+p_load(tidyverse, caret, lubridate, data.table, stringr, ggplot2, knitr, kableExtra, scales)
+
+dl <- tempfile()
+download.file("http://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+
+ratings <- fread(text = gsub("::", "\t", readLines(unzip(dl, "ml-10M100K/ratings.dat"))),
+                 col.names = c("userId", "movieId", "rating", "timestamp"))
+
+movies <- str_split_fixed(readLines(unzip(dl, "ml-10M100K/movies.dat")), "\\::", 3)
+colnames(movies) <- c("movieId", "title", "genres")
+
+movies <- as.data.frame(movies) %>% mutate(movieId = as.numeric(movieId),
+                                           title = as.character(title),
+                                           genres = as.character(genres))
+
+movielens <- left_join(ratings, movies, by = "movieId")
+
+# Validation set will be 10% of MovieLens data
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+
+# Make sure userId and movieId in validation set are also in edx set
+validation <- temp %>%
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+
+# Add rows removed from validation set back into edx set
+removed <- anti_join(temp, validation)
+edx <- rbind(edx, removed)
+
+# Remove temporary files to tidy environment
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+
+```
+
+
+
+## Introduction
+This project is concerned with a large dataset consisting of movie titles, release years, genres, ratings, and ID numbers associated with reviewers and movies. The goal of this project is to determine which factors within this dataset will allow us to most accurately predict the rating of a given movie.
+
+First, we will further explore the dataset and break down any variables that do not give us a clean and
+convenient view into what they can contribute regarding their ability to predict the movies ratings. We
+will then explore any possible trends in the data that may help us to determine facts that will help in the prediction process. Finally, we will take a number of different variables and fit them into a model that will eventually give us a successful system to predict movie reviews.
+
+In order to do this, we will split our data first into a separate “validation” dataset, that we will use to test the model at the end of our process. We are assuming that we know nothing about the values within the dataset.
+
+We will then split the data again into a “test” and “training” datasets. The training set will be used to fit different specifications into our model, which will then be compared to the test set to determine overall accuracy. At the end of the model, this same process is applied to the validation set.
+
+We will be measuring model accuracy using the square root of the variance of the residuals, referred to
+as RMSE. We are looking to minimize this value, and ideally have it below 0.86490.
+
+## Methods and Analysis
+
+Our first step is to explore the dataset itself and look for any potential difficulties. This is what we find:
+
+```{r,  echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+head(edx)
+```
+
+We would like to determine the impact of the release year on ratings; therefore we separate the film’s
+title and the year, which are both under the “title” variable.
+
+Finally, we would like to determine the impact of individual genre on a film’s rating; therefore we
+separate the genres that are currently all lumped together in the “genres” category. Our resulting dataset now looks like this:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+edx <- edx[,-4]
+
+# Separate title and year variables #
+edx <- edx %>% mutate(title = str_trim(title)) %>%
+  extract(title, c("title_temp", "year"), regex = "^(.*) \\(([0-9 \\-]*)\\)$", remove = F) %>%
+  mutate(year = if_else(str_length(year) > 4, as.integer(str_split(year, "-", simplify = T)[1]), as.integer(year))) %>%
+  mutate(title = if_else(is.na(title_temp), title, title_temp)) %>%
+  select(-title_temp)
+
+# Separate genre variable
+edx <- edx %>% separate_rows(genres, sep ="\\|")
+
+head(edx)
+```
+
+It’s with this clean dataset that we create our test and training sets.
+
+We will then test the impact of year, genre, and userID on a movie’s rating to see if these factors can
+help us make a prediction.
+
+## Results
+Before we begin testing the impacts of year and genre, we must first establish an RMSE baseline to
+determine whether our model is improving or not. First, we assume that we simply take the average of
+the movie rating of every movie in the database and make that our prediction. This is our resulting
+RMSE:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+set.seed(1997)
+test_index <- createDataPartition(y = edx$rating, times = 1, p = 0.2, 
+                                  list = FALSE)
+train_set <- edx[-test_index,]
+test_set <- edx[test_index,]
+
+
+
+### SIMPLE AVERAGE RMSE ###
+avg <- mean(train_set$rating)
+simple_rmse <- RMSE(test_set$rating, avg, na.rm = TRUE)
+simple_rmse
+
+```
+
+This awfully high, and not even close to our target RMSE.
+
+We will then look at the accuracy of using a simple linear regression model with the rating being the
+only independent factor (i.e., subtracting the average rating from the individual rating of every movie to act as the “beta” that would go into a linear model). This process is applied to the training set, and then applied to the test set (we will go through this process with every iteration of the model). Our resulting RMSE:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+movie_avgs <- train_set %>% 
+  group_by(movieId) %>% 
+  summarize(b_i = mean(rating - avg))
+
+pred_b_i <- avg + test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  pull(b_i)
+
+RMSE(pred_b_i, test_set$rating, na.rm = TRUE)
+```
+
+
+This is an improvement, but still nowhere near where it needs to be.
+
+We can believe that certain reviewers will be more optimistic or pessimistic than others. Next, we’ll take the userID variable into account by adding it into our model. We will subtract both the average and previous “beta” value from the individual movie’s ratings (this
+process too will be repeated with each additional model). Our new RMSE:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+user_avgs <- train_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - avg - b_i))
+
+pred_b_u <- test_set %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pred = avg + b_i + b_u) %>%
+  pull(pred)
+
+RMSE(pred_b_u, test_set$rating, na.rm = TRUE)
+```
+
+Another substantial improvement. This tells us that if we take into account an individual critic’s history, it’s easier to make a correct prediction as to what a movie’s rating will be. We can assume that certain genres receive higher ratings than others, and repeat the above process on
+the genre variable:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+genre_avgs <- train_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(user_avgs, by = "userId") %>%
+  group_by(genres) %>%
+  summarise(b_g = mean(rating - avg - b_i - b_u))
+
+pred_b_g <- test_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(user_avgs, by = "userId") %>%
+  left_join(genre_avgs, by = "genres") %>%
+  mutate(pred = avg + b_i + b_u + b_g) %>%
+  pull(pred)
+
+RMSE(pred_b_g, test_set$rating, na.rm = TRUE)
+```
+
+We can also assume that movies during a certain period of time received higher ratings than others, so
+we will repeat the above process with the year variable:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+year_avgs <- train_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(user_avgs, by = "userId") %>%
+  left_join(genre_avgs, by = "genres") %>%
+  group_by(year) %>%
+  summarise(b_y = mean(rating - avg - b_i - b_u - b_g))
+
+pred_b_y <- test_set %>%
+  left_join(movie_avgs, by = "movieId") %>%
+  left_join(user_avgs, by = "userId") %>%
+  left_join(genre_avgs, by = "genres") %>%
+  left_join(year_avgs, by = "year") %>%
+  mutate(pred = avg + b_i + b_u + b_g + b_y) %>%
+  pull(pred)
+
+RMSE(pred_b_y, test_set$rating, na.rm = TRUE)
+```
+
+
+With the addition of each additional variable, our accuracy as measured by RMSE improves. No included
+variable harms our accuracy. Next, we go through the process of regularization. With any given model or dataset, we can assume that there are outliers that skew the data. If one movie with a five star rating only has one review, it is treated by the dataset as equal to a movie with a five star review and 100 reviews. Regularization will remove movies with a certain number of reviews or less. What number will we select to maximize our accuracy?
+
+This number is referred to as the “lambda” of regularization, and we can test a wide range of lambdas
+on our model which will find the ideal value. This is what we find:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+lambdas <- seq(1, 6, 0.1)
+
+rmses <- sapply(lambdas, function(l){
+  b_i <- train_set %>%
+    group_by(movieId) %>%
+    summarise(b_i = sum(rating - avg)/(n()+l))
+  
+  b_u <- train_set %>%
+    left_join(b_i, by="movieId") %>%
+    group_by(userId) %>%
+    summarise(b_u = sum(rating - b_i - avg)/(n()+l))
+  
+  b_g <- train_set %>%
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by="userId") %>%
+    group_by(genres) %>%
+    summarise(b_g = sum(rating - b_i - b_u - avg)/(n()+l))
+  
+  b_y <- train_set %>%
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by="userId") %>%
+    left_join(b_g, by="genres") %>%
+    group_by(year) %>%
+    summarise(b_y = sum(rating - b_i - b_u - b_g - avg)/(n()+l))
+  
+  predicted_ratings <- test_set %>%
+    left_join(b_i, by="movieId") %>%
+    left_join(b_u, by="userId") %>%
+    left_join(b_g, by="genres") %>%
+    left_join(b_y, by="year") %>%
+    mutate(pred = avg + b_i + b_u + b_g + b_y) %>%
+    pull(pred)
+  
+  return(RMSE(predicted_ratings, test_set$rating, na.rm = TRUE))
+})
+
+lambdas[which.min(rmses)] # Result: 4.3 #
+```
+
+
+After applying this lambda to the model and removing outliers, we get our final training set RMSE:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+lambda <- 4.3
+min(rmses)
+```
+
+This is the most accurate model we’ve yet come across, which shows the regularization process has
+helped. In our last step, we clean the validation set in the same way we did our original dataset (i.e., removing the timestamp and separating year and genre variables). We then apply our final model to the validation set:
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, error = FALSE}
+b_i <- edx %>%
+  group_by(movieId) %>%
+  summarise(b_i = sum(rating - avg)/(n()+lambda))
+
+b_u <- edx %>%
+  left_join(b_i, by="movieId") %>%
+  group_by(userId) %>%
+  summarise(b_u = sum(rating - b_i - avg)/(n()+lambda))
+
+b_g <- edx %>%
+  left_join(b_i, by="movieId") %>%
+  left_join(b_u, by="userId") %>%
+  group_by(genres) %>%
+  summarise(b_g = sum(rating - b_i - b_u - avg)/(n()+lambda))
+
+b_y <- edx %>%
+  left_join(b_i, by="movieId") %>%
+  left_join(b_u, by="userId") %>%
+  left_join(b_g, by="genres") %>%
+  group_by(year) %>%
+  summarise(b_y = sum(rating - b_i - b_u - b_g - avg)/(n()+lambda))
+
+validation <- validation[,-4]
+
+# Separate Title and Year #
+validation <- validation %>% mutate(title = str_trim(title)) %>%
+  extract(title, c("title_temp", "year"), regex = "^(.*) \\(([0-9 \\-]*)\\)$", remove = F) %>%
+  mutate(year = if_else(str_length(year) > 4, as.integer(str_split(year, "-", simplify = T)[1]), as.integer(year))) %>%
+  mutate(title = if_else(is.na(title_temp), title, title_temp)) %>%
+  select(-title_temp)
+
+# Separate genre variable
+validation <- validation %>% separate_rows(genres, sep ="\\|")
+
+##### APPLY FINAL MODEL TO VALIDATION SET #####
+valid_model <- validation %>%
+  left_join(b_i, by="movieId") %>%
+  left_join(b_u, by="userId") %>%
+  left_join(b_g, by="genres") %>%
+  left_join(b_y, by="year") %>%
+  mutate(pred = avg + b_i + b_u + b_g + b_y) %>%
+  pull(pred)
+
+# Calculate final validation RMSE
+RMSE(valid_model, validation$rating) # Result: RMSE of 0.8625806
+
+
+```
+
+We have successfully built a model with an accuracy above our desired threshold.
+
+
+## Conclusion
+Our model has demonstrated that, based on the information in our dataset, the genre, year, and nature of the critic are all significant variables in determining how one can predict a movie’s rating. Furthermore, by removing movies with only roughly four reviews, we seriously improve our ability to
+predict ratings.
+
+One limitation is that there are a number of other factors that are not included in the dataset (e.g., film budgets, marketing, etc.). These could have even more significant impacts than those we have explored.
